@@ -1,0 +1,53 @@
+\section{Methodology}
+\label{sec:method}
+
+\subsection{Problem formulation}
+
+We treat each production \modes as a discrete latent label $m \in \{1, \ldots, K_m\}$ attached to a text passage $x$. For a fixed model $\gM$, a context length $N$, and a layer $L$, we extract a hidden state $\vh_{L}(x_{1:N}) \in \sR^{1536}$ at the last token of the truncated passage. Our central question is whether $m$ is linearly decodable from $\vh_{L}$, and how the decoded directions $\vw_m$ for different \modes relate to one another. We measure decodability via held-out classifier accuracy and geometric relationships via direction cosine and cross-mode probe transfer.
+
+\subsection{Model}
+
+We use \qwen as the reader: a 28-layer decoder-only transformer with hidden dimension 1536. For each passage $x$ we tokenize without special tokens, truncate to the first $N \in \{32, 64, 128\}$ tokens, and run a single forward pass. We record the last-token hidden state at every layer $L$, giving 29 representations (embedding plus 28 transformer blocks). To keep compute manageable we report probe accuracy at strided layers $L \in \{0, 2, 4, \ldots, 28\}$. We originally targeted \llama for direct comparability with \citet{sarfati2025prompt}, but a HuggingFace gate prevented automated download; \qwen is the closest similarly-scaled fully-open replacement.
+
+\subsection{Modes and corpora}
+\label{sec:corpora}
+
+We construct four corpora (6,649 passages total) that span axes chosen to be a priori independent: \emph{who wrote it} (authorship), \emph{what wrote it} (AI vs.\ human), \emph{how it sounds} (register), and \emph{what keyboard produced its typos} (typo). \Tabref{tab:corpora} summarises the four corpora.
+
+\begin{table}[t]
+\centering
+\caption{The four production-\modes corpora. Construction is deterministic from \texttt{src/build\_corpora.py} with seed 42.}
+\label{tab:corpora}
+\begin{tabular}{@{}llrl@{}}
+\toprule
+\textbf{Mode} & \textbf{Classes} & \textbf{n / class} & \textbf{Source} \\
+\midrule
+\authorship  & 7 authors (Austen, Twain, Melville, Joyce, Eliot, Hawthorne, Doyle) & 323--600 & Project \gutenberg, 1.2 kB passages \\
+\aihuman     & 2 (human, ChatGPT) & 600 & \hcthree paired Q\&A across 5 domains \\
+\register    & 2 (formal-academic, casual-conversational) & 280 & \gptmini-generated paired essays on identical topics \\
+\typo        & 2 (QWERTY-adjacent, Dvorak-adjacent typos) & 600 & \hcthree human answers, synthetic typo injection rate 0.06 \\
+\bottomrule
+\end{tabular}
+\end{table}
+
+The two synthetic \modes (\register and \typo) are constructed so that the only systematic variation between classes is the targeted axis: in \register, paired essays share the same prompt and topic; in \typo, both classes start from the same human answers and differ only in the keyboard-adjacency model used to inject typos at a fixed 6\% character rate.
+
+\subsection{Probes and baselines}
+
+\para{Neural probe.} Last-token hidden states are standardized (one-shot, fit on the training fold) and fed to a \logreg classifier (liblinear for binary modes, lbfgs for 7-way \authorship). For the multiclass \authorship probe we apply a 256-component PCA reduction prior to \logreg for speed; smaller-dimensional ablations confirm PCA does not materially affect accuracy.
+
+\para{TF-IDF baseline.} As a surface-feature reference, we fit \logreg on \tfidf unigram + bigram features (max 20K features, \texttt{min\_df}=2) computed from the raw passage text. This is the strongest standard surface baseline available without external feature engineering.
+
+\para{Evaluation.} We use 5-fold stratified cross-validation for every $(\text{mode}, N, L)$ cell, and report mean and standard deviation across folds. Multiclass \authorship is reported as accuracy; binary \modes are reported as accuracy (AUROC is qualitatively identical).
+
+\subsection{Geometric analyses}
+
+\para{Inter-mode direction cosine.} For each binary \modes, we take the unit-normalized probe weight vector at the deepest layer and longest context ($L=28, N=128$). For the multiclass \authorship \modes we take the first principal component of class-mean differences. The cosine of any two such directions measures subspace overlap in $\sR^{1536}$.
+
+\para{Cross-mode probe transfer.} To test whether the direction $\vw_A$ trained for \modes $A$ carries any information about \modes $B$, we project mode-$B$ standardized embeddings onto $\vw_A$ to obtain a 1-D score, train a tiny \logreg on this 1-D score against \modes-$B$ labels, and report 5-fold CV accuracy. A value at chance means the direction $\vw_A$ is uninformative for $B$; a value well above chance means $\vw_A$ partially aligns with the $B$ direction.
+
+\para{Intrinsic dimensionality.} We apply PCA to per-class mean embeddings for each \modes and report the number of components needed to explain 95\% of inter-class variance, as well as the first-PC variance of the full data restricted to each \modes corpus.
+
+\subsection{Reproducibility}
+
+All scripts are end-to-end and idempotent: \texttt{src/build\_corpora.py} (corpora), \texttt{src/extract\_embeddings.py} (forward pass and cache), \texttt{src/probe.py} (per-mode probes), and \texttt{src/merge\_and\_finalize.py} (baselines, geometry, plots). The random seed is fixed to 42 throughout. A single end-to-end run completes in $\sim$3 hours on one RTX A6000 (model forward) plus $\sim$1 hour CPU (probes).

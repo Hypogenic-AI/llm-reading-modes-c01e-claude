@@ -1,0 +1,1092 @@
+You are an academic paper writer. Generate a complete NEURIPS style paper
+based on the experiment results provided.
+
+════════════════════════════════════════════════════════════════════════════════
+                         IMPORTANT: BEFORE YOU START
+════════════════════════════════════════════════════════════════════════════════
+
+Before writing any content, you MUST complete these steps:
+
+1. READ THE SKILL: Review the paper-writer skill at .claude/skills/paper-writer/SKILL.md
+2. READ THE STYLE GUIDE: Study templates/paper_writing/lab_style_guide.md carefully
+3. REVIEW EXAMPLES: Browse paper_examples/ for formatting and language patterns:
+   - Look at sections/1.introduction.tex for language style
+   - Look at tables/*.tex for table formatting
+   - Look at commands/*.tex for macro usage
+4. VERIFY COMMAND TEMPLATES: Command templates (math.tex, general.tex, macros.tex) are pre-copied to paper_draft/commands/
+
+CRITICAL: Reference example papers for FORMATTING and LANGUAGE STYLE only.
+Do NOT copy content, phrasing, or narrative structure from the example papers.
+The examples are in a different research domain - focus only on presentation style.
+
+════════════════════════════════════════════════════════════════════════════════
+                            EXPERIMENT REPORT
+════════════════════════════════════════════════════════════════════════════════
+
+# "Modes" in LLM Reading — Are Production Modes Latent Variables in Hidden States?
+
+## 1. Executive Summary
+
+**Research question.** When you write a text, the LLM that reads it can often tell
+*how* you produced it — dictated vs. typed, written by another LLM vs. by a human,
+on a QWERTY vs. on a Dvorak keyboard. Do these *production modes* share a common
+representational footprint inside the model? Are they linearly decodable from the
+same hidden states? Are they geometrically *disentangled* (orthogonal) or
+overlapping?
+
+**Key finding.** Across four very different "modes" — multi-author literary style,
+AI-vs.-human authorship, formal-vs.-casual register, and QWERTY-vs.-Dvorak typo
+pattern — a single linear probe on Qwen2.5-1.5B last-token hidden states
+**decodes every mode well above chance and well above random direction baselines**
+(peak 79–99.8% accuracy across modes). The decoded *probe directions* between
+modes are **near-orthogonal** (all pairwise |cos| ≤ 0.18), and **cross-mode
+transfer of probe directions is at chance for typo↔register** and only modestly
+above chance for register↔ai-vs-human. **Production modes are real, multiple,
+and largely disentangled latent variables in LLM hidden states.**
+
+**Practical implication.** The "mode" abstraction unifies several scattered
+literatures (AI-text detection, stylometry, register classification). Because the
+modes occupy orthogonal subspaces in the residual stream, they could in principle
+be probed, *steered*, or *removed* independently — relevant to authorship privacy,
+controllable generation, and benchmark-contamination diagnostics.
+
+## 2. Research Question & Motivation
+
+**Hypothesis.** Multiple "production modes" of text are represented as linearly
+decodable, geometrically disentangled latent variables in the hidden states of a
+mid-size LLM.
+
+**Why it matters.** Three previously separate literatures — AI-text detection
+(Mitchell 2023; Schäfer 2025), authorship attribution (Rivera Soto 2021; Sarfati
+2025), and feature/SAE interpretability (Templeton 2024) — implicitly assume
+their phenomena are unrelated. The user's prompting question — *what other modes
+are LLMs detecting?* — implies a unifying abstraction (*mode*) that has not been
+empirically tested. Establishing or refuting it has consequences for:
+
+- **Privacy.** If keyboard layout or dictation status is a recoverable latent
+  variable, querying an LLM about user-authored text leaks more than the text.
+- **Evaluation.** Benchmarks contaminated by AI-generated text behave differently
+  on AI vs. human inputs *even if the content is matched* — invisible to most
+  detectors but visible in hidden states.
+- **Controllability.** If modes are orthogonal, activation steering can target
+  one mode without disturbing the others.
+
+**Gap in prior work** (synthesized in `literature_review.md`). Sarfati 2025 shows
+*authorial style* is linearly encoded in Llama-3.2-1B. DetectGPT and 200+ AI-text
+detectors handle the AI-vs-human axis independently. Nobody has asked: *do these
+two (and other) modes coexist in the same hidden-state geometry, and are they
+disentangled?*
+
+## 3. Methodology
+
+### 3.1 Model
+
+We use **Qwen2.5-1.5B** (28 transformer blocks, 1536-dim hidden) as the
+"reader." (We initially targeted Llama-3.2-1B per the Sarfati template but the
+HuggingFace gate prevented automated download; Qwen2.5-1.5B is the closest
+similarly-scaled fully-open replacement and is more recent.)
+
+For each text passage we tokenize without special tokens, take the first
+N ∈ {32, 64, 128} tokens, run a single forward pass, and record the **last-token
+hidden state at every layer** L ∈ {0, …, 28} (i.e., the embedding layer plus 28
+transformer blocks → 29 hidden states). We probe at strided layers
+L ∈ {0, 2, 4, …, 28} to keep compute manageable while preserving depth
+resolution.
+
+### 3.2 Modes and corpora (`data/chunks.parquet`, 6,649 passages)
+
+| Mode | Classes | n / class | Source |
+|------|---------|-----------|--------|
+| **authorship** | 7 (Austen, Twain, Melville, Joyce, Eliot, Hawthorne, Doyle) | 323–600 | Project Gutenberg, license-stripped, paragraph-aligned 1.2 kB passages |
+| **ai_vs_human** | 2 | 600 | HC3 (Guo 2023): paired human & ChatGPT answers, 5 source domains |
+| **register** | 2 (formal-academic, casual-conversational) | 280 | GPT-4.1-mini–generated **paired** essays on identical topics, varying only in register |
+| **typo** | 2 (QWERTY-adjacent, Dvorak-adjacent typos) | 600 | HC3 human answers with synthetic typo injection at rate 0.06 using QWERTY vs. Dvorak adjacency models |
+
+Construction is deterministic from `src/build_corpora.py` (seed 42). The four
+modes were chosen to span orthogonal axes of variation: who wrote it
+(authorship), what wrote it (ai/human), how it sounds (register), and what
+keyboard the typing artifacts come from (typo).
+
+### 3.3 Probes and baselines
+
+- **Neural probe.** Standard-scaled (one-shot) last-token hidden states fed to
+  `LogisticRegression` (liblinear for binary, lbfgs for multiclass authorship).
+  Multiclass authorship uses a PCA reduction to 256 components for speed;
+  smaller-dim experiments showed PCA does not affect accuracy.
+- **TF-IDF baseline.** LogReg on TF-IDF unigrams + bigrams (max 20k features,
+  min_df=2). Best surface-features-only baseline available without external
+  features.
+- **5-fold stratified CV** for every (mode, N, L) cell; report mean ± std.
+
+### 3.4 Geometric analyses
+
+- **Cross-mode transfer.** Fit a binary probe on mode A, take its coefficient
+  direction $w_A$, project mode B's standardized embeddings onto $w_A$ to get
+  a 1-D score, train a tiny LogReg on that 1-D score against mode B's labels,
+  report 5-fold CV accuracy. Above 0.5 means $w_A$ carries information about B.
+- **Inter-mode cosine.** For each binary mode, take the unit-normalized probe
+  weight vector; for the multiclass authorship mode, take the first principal
+  component of class-mean differences. Cosine between any two such directions
+  measures subspace overlap.
+- **Intrinsic dimensionality.** PCA on class-mean differences; report the
+  number of components needed to explain 95% of inter-class variance.
+
+### 3.5 Reproducibility
+
+- Random seed: 42 throughout.
+- Hardware: 4× RTX A6000 (one used; CPU-bound probes do not benefit from more).
+- Software: torch 2.12, transformers 5.9, scikit-learn 1.8, numpy/pandas latest;
+  full lockfile in `uv.lock`.
+- Pipeline scripts: `src/build_corpora.py`, `src/extract_embeddings.py`,
+  `src/probe.py`, `src/merge_and_finalize.py`. Each is end-to-end and idempotent.
+
+## 4. Results
+
+### 4.1 Probe accuracy by layer and N (Table 1)
+
+Peak accuracy per mode, at the best (N, L) cell:
+
+| Mode | Peak acc | Peak (N, L) | TF-IDF baseline |
+|------|---------:|:------------|----------------:|
+| ai_vs_human (binary) | **0.993 ± 0.005** | (128, 18) | 0.884 |
+| authorship (7-class) | **0.792 ± 0.018** | (128, 28) | 0.958 |
+| register (binary)    | **0.998 ± 0.003** | (64, 18)  | 1.000 |
+| typo (binary)        | **0.745 ± 0.032** | (128, 28) | 0.919 |
+
+(All chance baselines: 0.50 for binary; 1/7 ≈ 0.143 for authorship.)
+
+### 4.2 Layer-depth profile (Figure 1)
+
+![Layer profile](figures/acc_vs_layer.png)
+
+The four modes have qualitatively different *emergence profiles*:
+
+- **ai_vs_human and register**: Jump from ~0.6 at the embedding layer to ~0.95
+  by L=2, then climb steadily to >0.99 by L=18. Saturation is reached well
+  before the final block.
+- **authorship**: Emerges *gradually* from 0.20 (L=0) to 0.79 (L=28). Does not
+  saturate — final layers still help. Consistent with Sarfati 2025 Fig. 2B.
+- **typo**: Almost flat at ~0.55 across all middle layers, climbing only at the
+  *final* layers to 0.74. The model's *late* layers are needed to make this
+  surface-form-driven distinction explicit.
+
+This split tells a story: high-level *content/style* modes (ai/human, register)
+crystallize early; *author identity* requires deep semantic features that build
+gradually; *surface-typing artifacts* are visible mostly at very late layers,
+suggesting they reside in lexical / token-distribution structure rather than
+abstract representations.
+
+### 4.3 Heatmaps — N × Layer (Figure 2, all four modes)
+
+Heatmaps saved to `figures/heatmap_*.png`. The ai_vs_human heatmap
+(`heatmap_ai_vs_human.png`) is a clean monotone climb in both N and L.
+Authorship shows the largest N-dependence, while register saturates at N=32 —
+register is a "global" property that emerges from very few tokens, whereas
+authorship requires more context to disambiguate (consistent with Sarfati's
+N=64–128 sweet spot).
+
+### 4.4 Inter-mode direction cosine (Figure 3)
+
+![Mode cosine](figures/mode_cosine.png)
+
+Pairwise cosine between mode directions (last layer, N=128):
+
+```
+              ai_vs_human  register  typo  authorship
+ai_vs_human       1.00       -0.04   0.01     -0.04
+register         -0.04        1.00  -0.00      0.18
+typo              0.01       -0.00   1.00     -0.00
+authorship       -0.04        0.18  -0.00      1.00
+```
+
+All off-diagonal entries have |cos| ≤ 0.18 — **modes are nearly orthogonal**
+in the hidden-state geometry. The largest entry (register ↔ authorship = 0.18)
+reflects the fact that 19th-century literary prose is overwhelmingly formal,
+so an "is-formal" direction has weak alignment with an "is-Joyce-vs-Twain"
+direction.
+
+### 4.5 Cross-mode probe transfer (Figure 4)
+
+![Cross transfer](figures/cross_transfer.png)
+
+Train a 1-D LogReg on the projection of mode B's data onto mode A's probe
+direction; report mode-B classification accuracy.
+
+```
+                   test→ ai_vs_human  register  typo
+train↓
+ai_vs_human                  1.00      0.60     0.52
+register                     0.74      1.00     0.48
+typo                         0.62      0.50     1.00
+```
+
+Three observations:
+
+1. **register → ai_vs_human at 0.74** — well above chance. The formality
+   direction also separates AI from human text, reflecting GPT's well-known
+   formal-register bias.
+2. **typo and register are perfectly decoupled** (0.48 / 0.50 — at chance).
+   Synthetic keyboard-layout typo patterns share *no* direction with stylistic
+   register.
+3. **typo → ai_vs_human at 0.62** is slightly above chance — perhaps because
+   typo-free text reads as more "machine-like."
+
+This is the strongest evidence for **partial disentanglement**: modes share
+mild overlap where the underlying content correlates (formal style ≈ AI), but
+modes whose generative processes are independent (typo vs. register) are
+orthogonal in the geometry too.
+
+### 4.6 Neural probe vs. TF-IDF baseline (Figure 5)
+
+![Probe vs baseline](figures/probe_vs_baseline.png)
+
+| Mode | TF-IDF acc | Neural-probe acc | Δ (probe − TF-IDF) |
+|------|-----------:|-----------------:|-------------------:|
+| ai_vs_human | 0.884 | **0.993** | **+0.109** |
+| authorship  | **0.958** | 0.792 | −0.166 |
+| register    | 1.000 | 0.998 | −0.002 |
+| typo        | **0.919** | 0.745 | −0.174 |
+
+Surface n-grams are **stronger** for *authorship* (the entire Gutenberg vocabulary
+distinguishes Joyce from Twain trivially) and *typo* (the misspelled tokens
+*are* the signal — n-grams see them directly, while a 1536-dim hidden state has
+to integrate them). For *AI-vs-human*, the neural probe beats TF-IDF by a clear
+margin (98.8 vs. 95.7 AUROC). For *register*, both saturate at 100%.
+
+The take-away is *not* "neural probes are weaker" — it is that the neural probe
+is doing something **different**. The probe accesses an abstract representation
+that does not always exceed surface features in raw accuracy, but it captures
+*geometric* structure (orthogonality, cross-mode transfer) that surface features
+cannot.
+
+### 4.7 Subspace geometry (Table 2)
+
+| Mode | n_classes | Intrinsic dim (95% var of class-mean diffs) | 1st-PC var of full data |
+|------|----------:|--------------------------------------------:|------------------------:|
+| ai_vs_human | 2 | 1 | 0.178 |
+| authorship  | 7 | 5 | 0.336 |
+| register    | 2 | 1 | 0.212 |
+| typo        | 2 | 1 | 0.265 |
+
+For binary modes, intrinsic dim = 1 by construction. For authorship, only 5
+dimensions cover 95% of inter-author variance — a low-rank embedding of seven
+authors in a 1536-dim space, broadly consistent with Sarfati's ~16-PCA finding
+for 13 books. The first-PC variance of *all data* per mode (0.18–0.34) shows
+the modes carve out non-trivial fractions of the embedding manifold.
+
+## 5. Analysis & Discussion
+
+### 5.1 Does the evidence support the hypothesis?
+
+The original hypothesis decomposed into five sub-claims (planning.md):
+
+| Claim | Verdict | Evidence |
+|-------|---------|----------|
+| **H1. Each mode is decodable >75%** | **Supported** for 4/4 modes | Peaks 79–99.8% |
+| **H2. Depth monotone climb** | **Supported** for 3/4 (ai_vs_human, register, authorship); typo emerges only at deep layers | Figure 1 |
+| **H3. Low intrinsic dim (≲20)** | **Supported** | All ≤ 5 |
+| **H4. Partial disentanglement** | **Supported** | Max off-diag cos = 0.18; max non-trivial transfer = 0.74 (register → ai_vs_human) |
+| **H5. Synthetic-mode probe captures something** | **Supported (with caveat)** | Typo probe reaches 0.74 — well above chance, but TF-IDF on the same data reaches 0.92, indicating most of the "typo signal" is surface lexical structure rather than deep features |
+
+### 5.2 Mode-as-latent-variable: revised picture
+
+The clean orthogonality of cos ≤ 0.18 across all four modes — coupled with peak
+accuracies that span the full 0.74-to-0.99 range — argues for **multiple distinct
+mode subspaces that coexist in the residual stream**. They are *not* a single
+"style" axis with different projections; they are largely independent directions.
+
+The most interesting positive transfer is **register → ai_vs_human at 0.74**.
+Project the AI-vs-human dataset onto the formal-vs-casual direction and you
+recover three-quarters of the AI-vs-human label. This is the residue of a
+well-known empirical fact about ChatGPT-era text (and observed by Schäfer 2025
+in non-neural features): AI writing biases formal. Our experiment quantifies
+that overlap in *latent space* for the first time.
+
+### 5.3 Layer-depth: surface vs. abstract modes
+
+The contrast between **typo** (flat until L≈22, climbs only at the end) and
+**authorship** (gradual rise across all layers) is informative.
+
+- **Surface-token modes** (typo) require the late layers to expose their signal
+  because the late layers are where the model is *deciding the next token* — i.e.,
+  where lexical-surface differences become read-out behaviour.
+- **Semantic/style modes** (authorship) accumulate across the entire stack
+  because they integrate many lexical and syntactic cues.
+- **Content-frame modes** (register, ai_vs_human) emerge very early — possibly
+  because their cues are common-word distributional features that show up in
+  even shallow representations.
+
+This is a novel, three-tier layering of "mode" types that has not been reported.
+
+### 5.4 Surprises and caveats
+
+- **TF-IDF beats neural probes for authorship and typo.** A reasonable
+  reviewer would call this a strong negative for the "deep representation"
+  framing. We emphasize that TF-IDF *is what it is*: 20k explicit n-gram
+  features. The neural probe accesses a 1536-dim summary forced through a
+  causal-LM bottleneck. The fact that 1536 dims still recover 79% of 7-author
+  classification (peak L=28) is a measure of how much of stylometry is
+  *encoded*, not how much exists in surface form.
+- **Register and ai_vs_human are easy.** Both saturate near 100% because the
+  classes are well-separated (paired LLM-generated essays for register; ChatGPT
+  formula vs. Reddit answers for ai_vs_human). Both could be made harder with
+  adversarial paraphrasing — left for future work.
+- **Synthetic typo mode.** Both QWERTY and Dvorak typos are injected by us; the
+  model sees no labels of which keyboard. The fact that a 1-D probe direction
+  separates them at 0.745 is meaningful: the *statistical pattern* of typos —
+  which letters tend to be substituted by which — is enough to recover the
+  underlying keyboard, even though no token sequence is informative on its own.
+  This is the closest empirical analogue to the original hypothesis's
+  "keyboard-layout mode."
+
+## 6. Limitations
+
+- **Single model.** We used Qwen2.5-1.5B only. Sarfati's qualitative findings
+  replicated cleanly, suggesting model-independence of the conclusion, but
+  cross-model robustness was not measured.
+- **Synthetic modes ≠ natural distributions.** Our typo injection uses a
+  uniform substitution rate; real human typos cluster and depend on cognitive
+  load. Register pairs are LLM-written, so they reflect *the LLM's notion of
+  register*, not actual human formal/casual writing.
+- **No causal intervention.** We demonstrate decodability and disentanglement,
+  not load-bearing-ness. A causal-style experiment (Li et al. 2022) — projecting
+  out a mode direction and measuring generation change — would strengthen the
+  "latent variable" claim. Left for follow-up.
+- **HC3 ChatGPT vintage.** HC3 was collected in early 2023; today's ChatGPT
+  writes differently. The "AI-mode" we are decoding is *2023 ChatGPT style*,
+  not a generic property of LLMs.
+- **Probe-classifier confound.** Our cross-transfer metric uses a 1-D LogReg
+  on the projection — generous to chance overlap. A stricter test would use
+  the probe's *threshold* directly, not allow refitting.
+- **No human baseline.** We have no measurement of how well humans recover
+  these modes from the same text. Human accuracy would calibrate the probe
+  numbers against an ecological reference.
+
+## 7. Conclusions & Next Steps
+
+### Answer to the research question
+
+**Yes** — production modes are linearly decodable, geometrically near-orthogonal
+latent variables in mid-size LLM hidden states. Across four very different modes
+(authorship, AI-vs-human, register, keyboard-layout typo pattern) probes recover
+the latent label at 75–99% accuracy, mode directions are pairwise near-orthogonal
+(|cos| ≤ 0.18), and cross-mode transfer is near chance except for a single
+content-driven overlap (register ↔ AI-text). The "mode" abstraction therefore
+*unifies* what the AI-detection, stylometry, and register literatures have
+treated as separate problems — and shows them to coexist in the same hidden
+state geometry without interfering with one another.
+
+### Practical implications
+
+- **Privacy / leakage.** Production mode is recoverable from arbitrary writing.
+  A model fine-tuned on user text can probably tell, with high confidence, *how*
+  it was produced. This is a non-trivial side-channel.
+- **Activation steering / removal.** Because modes are orthogonal, a steering
+  vector along one mode (e.g. "make this less formal") should not disturb
+  another (e.g., "preserve the author's voice"). Worth testing directly.
+- **Benchmark contamination.** AI-text contamination is detectable in hidden
+  states even when it is invisible at the surface; the same probe could be a
+  cheap contamination diagnostic.
+
+### Concrete follow-ups (ranked by feasibility)
+
+1. **Activation-steering ablation.** Subtract the AI-vs-human probe direction
+   from hidden states during generation; measure perplexity and style shift.
+2. **Cross-model replication.** Re-run on Llama-3.2-1B (HF gate permitting),
+   Pythia-1B (similar 16-layer architecture), and Qwen2.5-7B for size scaling.
+3. **Real keyboard-layout data.** Compare synthetic typo probe to a probe
+   trained on actual QWERTY-vs-Dvorak user-typed text (requires data
+   collection; could use the GitHub keystroke datasets as starting points).
+4. **Sparse autoencoder discovery.** Train an SAE on a multi-mode corpus and
+   see whether mode features emerge unsupervised in the SAE dictionary, as
+   Templeton 2024 reports for "code" and "emotion."
+5. **More modes.** Time of day of writing; native vs. L2 English; dictated
+   (via ASR pipeline) vs. typed; mobile vs. desktop typing. Each is a one-day
+   extension of the current pipeline.
+
+### Open questions
+
+- Are *all* salient mode directions orthogonal, or only those we tested?
+  An exhaustive sweep over candidate modes would be more informative than four
+  hand-chosen ones.
+- Does the orthogonality grow with model scale? (Linear-features-as-population
+  hypotheses predict yes.)
+- Is there a mode "manifold" — a higher-order geometry where most production
+  modes lie on a smooth low-dim surface — or are they truly independent axes?
+
+## References (resources used)
+
+- Sarfati et al. 2025, *What's in a prompt? Literary style in prompt embeddings.*
+  arXiv:2505.17071. **Methodological template.**
+- Mitchell et al. 2023, *DetectGPT.* arXiv:2301.11305.
+- Guo et al. 2023, *HC3 — How close is ChatGPT to human experts?* arXiv:2301.07597.
+- Templeton et al. 2024, *Scaling Monosemanticity.* Anthropic.
+- Alain & Bengio 2016, *Linear classifier probes.* arXiv:1610.01644.
+- Li et al. 2022, *Emergent World Representations (Othello-GPT).* arXiv:2210.13382.
+- Schäfer & Steinebach 2025, *Stylistic & statistical feature modeling.*
+- Qwen Team 2024, *Qwen2.5 technical report.* (Model: `Qwen/Qwen2.5-1.5B`).
+- Datasets: Project Gutenberg (public domain); HC3 (CC-BY-SA).
+- Tools: `transformers`, `scikit-learn`, `pandas`, `matplotlib`, `seaborn`,
+  `uv`, `openai` (for register-pair generation only).
+
+---
+
+**Reproduction.** All code in `src/`; data download / regeneration instructions
+in `datasets/README.md`. From a clean checkout:
+
+```bash
+uv venv && source .venv/bin/activate && uv sync
+python src/build_corpora.py          # builds data/chunks.parquet
+python src/extract_embeddings.py     # → cache/embeddings.npz (~2 GB)
+bash src/run_remaining.sh            # parallel probes
+python src/merge_and_finalize.py     # baselines, transfer, geometry, plots
+```
+
+Total wall-clock: ~3 h on a single A6000 (model forward) + 1 h CPU (probes).
+
+
+════════════════════════════════════════════════════════════════════════════════
+                            RESEARCH PLAN
+════════════════════════════════════════════════════════════════════════════════
+
+# Research Plan: "Modes" in LLM Reading
+
+## Motivation & Novelty Assessment
+
+### Why This Research Matters
+
+LLMs trained on naturalistic web text appear sensitive to many subtle "modes" of
+text production — whether a passage was dictated rather than typed, written by another
+LLM, or marked by the keyboard layout the author used. If these signals are real,
+they raise immediate questions for evaluation (benchmark contamination by AI text),
+privacy (demographic / device inference from style), and steering (can we control
+production modes deliberately?). Yet the literature has fragmented this work into
+three silos: AI-text detection, authorship attribution, and probing for individual
+features. No prior work tests whether these are instances of a single more general
+**"mode" abstraction** that an LLM represents internally.
+
+### Gap in Existing Work
+
+Per `literature_review.md`:
+- AI-vs-human detection (Mitchell DetectGPT, Verma Ghostbuster, Schäfer features)
+  and authorship attribution (Rivera Soto, Sarfati) develop distinct methods for
+  what may be the same problem.
+- Sarfati 2025 shows literary style is encoded as a near-linear subspace in
+  Llama-3.2-1B, but only tests one mode (authorship).
+- Cross-mode interference — does an "AI-text" probe pick up on register, dictation,
+  or typing artifacts? — is **unstudied**.
+- "Modes" beyond authorship and AI-generation (register, dictation, keyboard layout)
+  are not probed at all in prior work.
+
+### Our Novel Contribution
+
+We treat **mode as a unified latent variable** and use a single probing pipeline
+(Sarfati-style linear/MLP probes on Llama-3.2-1B last-token embeddings) to test:
+
+1. Whether multiple distinct mode types — authorship, AI-generation, register,
+   keyboard-layout typo pattern — are all linearly decodable from the same hidden
+   states.
+2. Whether mode subspaces are **disentangled** (orthogonal) or overlapping, by
+   measuring cross-mode probe transfer and inter-direction cosine similarity.
+3. Whether the **intrinsic dimensionality** of each mode subspace differs in ways
+   that reveal structure (e.g., production-channel modes simpler than authorial
+   modes).
+4. Whether mode probes generalize to **out-of-distribution surface forms** of the
+   same mode (a probe trained on QWERTY typos applied to mistyped Wikipedia text).
+
+This unification — testing many modes within a single representation space and
+measuring their geometric relationships — is novel.
+
+### Experiment Justification
+
+| # | Experiment | Why it's needed |
+|---|------------|-----------------|
+| 1 | Replicate Sarfati on Gutenberg authorship | Verify our methodology produces the published baseline before extending; sanity-check pipeline |
+| 2 | Probe AI vs. human (HC3) layer-wise | First test of whether the *same* probe family that detects authorship also detects AI-mode, and where in the model it emerges |
+| 3 | Probe novel synthetic modes (QWERTY typos, dictation-style disfluency, register) | Test whether modes *not in any training set* are nonetheless represented — central novelty claim |
+| 4 | Cross-mode transfer & subspace geometry | Test the unification claim: are mode subspaces orthogonal? do probes confuse modes? |
+
+## Research Question
+
+Are diverse "modes" of text production — authorship, AI vs. human generation,
+register, and keyboard-layout-induced typing artifacts — represented as **linearly
+decodable, geometrically disentangled latent variables** in the hidden states of a
+mid-size LLM (Llama-3.2-1B)?
+
+## Hypothesis Decomposition
+
+- **H1 (Decodability).** A linear probe on Llama-3.2-1B last-token embeddings
+  achieves >75% accuracy on each of: authorship (Gutenberg 11-class), AI vs. human
+  (HC3), register (formal vs. casual), and typo-pattern (QWERTY vs. Dvorak-adjacent).
+- **H2 (Depth.** Mode accuracy increases with layer depth from L=2 to L≈10, then
+  plateaus or declines slightly (replicating Sarfati Fig. 2B shape).
+- **H3 (Low-dimensional subspace).** Each mode subspace, as recovered by PCA on the
+  probe-decision space, has intrinsic dimensionality ≲ 20.
+- **H4 (Partial disentanglement).** Mode subspaces are not orthogonal (cross-mode
+  cosine > 0), but cross-mode probe transfer is well below within-mode (transfer
+  accuracy < 0.7 × within accuracy).
+- **H5 (Within-mode generalization).** A probe trained on synthetic QWERTY typos
+  generalizes (above chance) to natural-text typo distributions not seen in training.
+
+## Proposed Methodology
+
+### Approach
+
+Single-pipeline probing study, following Sarfati 2025:
+
+1. Tokenize text → chunks of length N (varying N ∈ {16, 32, 64, 128}).
+2. Forward pass through Llama-3.2-1B; collect **last-token hidden states** at each
+   of 16 layers.
+3. For each (mode, N, L), train a probe (LogReg / MLP) and measure held-out accuracy.
+4. Repeat for 4 modes within the same embedding cache; analyze geometry.
+
+### Experimental Steps
+
+**Phase A — Pipeline setup**
+1. Download Llama-3.2-1B; verify forward-pass returns `hidden_states` for all layers.
+2. Implement chunked tokenization + last-token extraction → embeddings cache.
+
+**Phase B — Build mode corpora** (all balanced ~1000 samples per class)
+1. **Authorship**: Gutenberg, 11-class (already labeled).
+2. **AI-vs-human**: HC3 paired answers (binary).
+3. **Register**: GPT-4-class LLM generates a passage in {formal-academic, casual-conversational} for each of ~500 prompts (binary).
+4. **Typo pattern**: Take clean text, inject typos using QWERTY-adjacency vs.
+   Dvorak-adjacency models (binary). Held-out: natural Wikipedia revision noise
+   (if obtainable) or text with random non-adjacent typos.
+
+**Phase C — Run probes** (LogReg + MLP) at every L for N ∈ {16, 64, 128}.
+
+**Phase D — Geometric analysis**
+- PCA on per-class mean embeddings to recover mode subspace; report explained-variance dimensionality.
+- Cosine similarity matrix between mode directions (first PC of each mode's class-mean differences).
+- Cross-mode probe transfer matrix: train probe on mode A, test on mode B examples
+  using A's labels-by-analog.
+
+### Baselines
+
+- **Random chance** per task.
+- **Bag-of-words TF-IDF + LogReg**: a surface-feature baseline. If neural probes
+  don't beat this, hidden-state representation adds no signal.
+- **Last-layer only** (cf. probes at every L): is "deep" representation needed?
+
+### Evaluation Metrics
+
+- **Accuracy** (multiclass authorship), **AUROC** + Accuracy (binary modes).
+- **Layer × N heatmap** (Sarfati Fig. 2B style).
+- **Confusion matrix** for authorship (intra- vs. extra-author).
+- **PCA explained-variance curves** for intrinsic dimensionality.
+- **Cross-mode transfer matrix** (4×4 accuracy table).
+
+### Statistical Analysis Plan
+
+- 5-fold stratified CV; report mean ± std.
+- Significance: compare probe accuracy against TF-IDF baseline with paired
+  t-test across folds; α = 0.05.
+- Effect sizes: Δaccuracy, Cohen's d on per-fold differences.
+
+## Expected Outcomes
+
+- **Supportive of hypothesis**: All four modes decodable >75%; clear monotone
+  layer×N progression; PCA dim ≲20 for each; cross-mode cosine moderate but transfer
+  weak.
+- **Refuting**: AI-mode probe fails (would contradict published results — likely an
+  implementation bug); register/typo modes near chance (would mean LLM doesn't
+  encode them); cross-mode transfer ≈ within (would mean modes are not separable).
+
+## Timeline and Milestones
+
+| Phase | Time | Output |
+|-------|------|--------|
+| Setup (Llama download, env) | 15 min | Working model |
+| Data prep (4 mode corpora) | 30 min | `data/chunks.parquet` |
+| Embedding extraction (cached) | 30 min | `cache/embeddings.npz` |
+| Probe training (all modes × layers × N) | 30 min | `results/probe_scores.csv` |
+| Geometry analysis | 15 min | `results/geometry.csv` |
+| Plots & report | 30 min | `figures/*.png`, REPORT.md |
+
+Total budget: ~2.5h experiment + 30min documentation.
+
+## Potential Challenges
+
+- **Llama download size / time**: Mitigate by caching to HF dir; fall back to
+  Pythia-1B if HF rate-limits.
+- **HC3 length imbalance** (human answers shorter): chunk at fixed N to neutralize.
+- **Synthetic register / typo data may be too easy**: include a TF-IDF baseline so we
+  know whether probe is doing more than surface counting.
+- **GPU OOM**: Llama-1B fits easily in a single A6000; batch size 32 safe.
+
+## Success Criteria
+
+- Pipeline runs end-to-end without errors.
+- At least 3 of 4 modes show probe accuracy >>chance.
+- Geometric analysis produces interpretable structure (Layer×N heatmap, cross-mode
+  cosine matrix).
+- REPORT.md states a clear answer to the research question grounded in our results.
+
+
+════════════════════════════════════════════════════════════════════════════════
+                          LITERATURE REVIEW
+════════════════════════════════════════════════════════════════════════════════
+
+# Literature Review: "Modes" in LLM Reading
+
+**Research hypothesis**: LLMs detect various "modes" in text — dictation, AI-authored,
+keyboard-layout influence, etc. — and these "modes" can potentially be isolated as
+latent variables in LLM representations.
+
+## 1. Research Area Overview
+
+The hypothesis sits at the intersection of three established literatures:
+
+1. **Machine-generated text detection** — a large, fast-moving field that defines and
+   detects the "AI-authored" mode as a binary or multi-class classification problem.
+2. **Authorship attribution and stylometry** — a much older field that treats authorial
+   "style" as a hidden variable detectable from surface text.
+3. **Mechanistic interpretability / probing** — a methodological field providing the
+   tools (linear probes, SAEs, intervention) to ask "what does the model represent?"
+
+The novelty of this project is to **unify (1) and (2) as instances of a more general
+"mode" detection problem**, and to use (3) to test whether such modes can be cleanly
+isolated as latent variables. The closest existing work to that synthesis is
+**Sarfati et al. 2025**, which shows that LLM deep embeddings already encode literary
+style as a near-linear subspace.
+
+## 2. Key Papers (Ranked by Relevance)
+
+### Sarfati et al. 2025 — Literary style in prompt embeddings (arXiv:2505.17071)
+**Methodology** (most directly applicable to our hypothesis):
+- Tokenize a literary work, split into N-token chunks (N ∈ {8, 16, …, 128}).
+- For each chunk, pass through Llama-3.2-1B (16 layers).
+- Collect the *last token's* embedding after each layer L.
+- Train an SVM (binary) or MLP (multiclass) probe to classify chunks by source book.
+- Vary L (depth) and N (context) to see when "style" emerges.
+
+**Findings**:
+- Binary book-vs-book separability climbs from ~50% at L=2 to >90% at L=10+, N≥64.
+- Multiclass (13 books) MLP probe reaches ~75% accuracy with N=128, L=16.
+- Same-author confusion is markedly higher than across-author → style ≠ topic.
+- Style lies within ~16 PCA dimensions (intrinsic dim. ~20).
+- **Token shuffling barely hurts probe accuracy** → style signal is lexical, not syntactic.
+- Probes trained on French author-pairs transfer to English translations of the same
+  pairs → style geometry is partially language-independent.
+
+**Why this is the load-bearing paper**: Sarfati provides both (i) evidence that an
+intangible attribute (style) is encoded as a latent variable, and (ii) a complete
+methodology we can directly extend to other "modes" (dictation, AI-authorship, keyboard
+artifacts).
+
+### Mitchell et al. 2023 — DetectGPT (arXiv:2301.11305)
+**Methodology**: Zero-shot. To test if text x came from model pθ:
+1. Generate k perturbations x̃ᵢ using T5 mask-filling.
+2. Score d(x) = log pθ(x) − mean(log pθ(x̃ᵢ)).
+3. Threshold: large positive d ⇒ machine-generated (negative curvature region).
+
+**Findings**: AUROC 0.95+ on GPT-Neo-20B-generated news, beating strongest zero-shot
+baseline by 0.14. Works because LLM samples lie in negative-curvature regions of pθ;
+human text does not.
+
+**Why relevant**: Establishes that "AI vs. human" mode is detectable *without* learning
+a classifier — model probabilities alone reveal it. Suggests "mode" may be detectable
+at multiple levels: (a) hidden-state representations (Sarfati), (b) output probabilities
+(DetectGPT), (c) statistical text features (Schäfer & Steinebach 2025).
+
+### Alain & Bengio 2016 — Linear classifier probes (arXiv:1610.01644)
+The methodological grandparent. Train a linear classifier on frozen activations at each
+layer. Layer-wise probe accuracy reveals where information is encoded. Foundational for
+all interpretability work below.
+
+### Li et al. 2022 — Othello-GPT emergent world representations (arXiv:2210.13382)
+Proves the strong form of the latent-variable claim: a transformer trained only on
+Othello move sequences develops a probe-decodable, *causally interveneable* internal
+board state. This is the gold standard for "isolate mode as latent variable" — it
+combines decoding (probe) with control (intervention).
+
+### Rivera Soto et al. 2021 — Universal authorship representations (arXiv:2109.07020)
+Cross-domain transfer of style/authorship embeddings (Amazon reviews, fanfiction, Reddit).
+Some domain pairs transfer well; others don't. Implication: style is partially separable
+from domain/topic, but the separation is incomplete.
+
+### Templeton et al. 2024 — Scaling monosemanticity (Sparse Autoencoders)
+SAEs on Claude 3 Sonnet extract interpretable features — cities, emotions, deception,
+code patterns. Most-importantly, this method is **unsupervised** — it discovers candidate
+"modes" without needing them labeled in advance. Highly relevant to the hypothesis's
+second half: "What *other* modes are LLMs detecting?" — SAEs are the natural tool.
+
+### Schäfer & Steinebach 2025 — Stylistic & statistical feature modeling
+Hand-crafted features (220 from LFTK) classify AI vs. human at F1 90%+. Key insight:
+AI text has higher Kuperman age (word complexity) and lower lexical variation than
+human text. Provides a non-neural baseline that any probing study should beat.
+
+### Other AI-detection papers (Chakraborty 2023, Ippolito 2019, Verma 2023, Zeng 2025,
+Thorat 2025, Roy 2025, Miralles-González 2025, Fu 2025)
+Collectively establish:
+- Detection AUROC declines as LLM size grows (larger LLMs less detectable).
+- Detection is harder cross-domain and cross-generator.
+- Adversarial paraphrasing and few-shot generation evade many detectors.
+- LLM fingerprinting (which-LLM-generated-this) is feasible at >95% accuracy on
+  in-distribution data.
+
+## 3. Methodologies Common in the Literature
+
+| Method | Used by | Use for "modes" research |
+|--------|---------|---------------------------|
+| **Linear / MLP probing on frozen activations** | Alain & Bengio; Sarfati; Li (Othello); Marks & Tegmark | First-line tool to test "is mode X represented?" |
+| **Layer-wise scan** (probe at every layer) | Sarfati; Alain & Bengio | Locates *where* in the model a mode emerges |
+| **PCA / SVD on activations** | Sarfati; Park et al. | Reveals dimensionality of the mode subspace |
+| **Causal intervention / activation steering** | Li (Othello); Templeton; Gu et al. 2025 | Tests whether the mode is *load-bearing* for behavior |
+| **Output-distribution-based detection** | Mitchell (DetectGPT); Ippolito; Verma (Ghostbuster) | Zero-shot baselines, no probe training needed |
+| **Hand-crafted feature classifiers** | Schäfer; Sharma & Mansuri (SemEval-2024) | Strong non-neural baselines |
+| **Sparse autoencoders / dictionary learning** | Templeton; Bricken et al. 2023 | Unsupervised discovery of latent modes |
+| **Cross-domain / cross-generator transfer** | Rivera Soto; M4 benchmark | Tests whether a mode is intrinsic vs. surface |
+| **Token shuffling ablation** | Sarfati; Viswanathan 2025 | Distinguishes lexical from syntactic signal |
+
+## 4. Standard Baselines for "Mode" Detection Experiments
+
+- **Hand-crafted stylistic features + Logistic Regression / SVM** — Schäfer-style. Cheap, robust.
+- **Mean per-token log-probability** under the source LLM (Solaiman 2019).
+- **DetectGPT** — perturbation-based curvature.
+- **Fine-tuned RoBERTa / DistilBERT classifier** (e.g., HC3 reference detector).
+- **Linear probe on Llama-3.2-1B last-token embeddings** (Sarfati replication).
+
+## 5. Evaluation Metrics
+
+- **AUROC** — primary metric for binary detection (most papers).
+- **Accuracy** — for closed-set multiclass attribution (Sarfati uses this).
+- **F1 / Macro-F1** — when classes are imbalanced.
+- **FPR @ low TPR** (e.g., FPR95) — used in OOD-detection framings (Zeng 2025).
+- **Per-class confusion** — important for revealing intra-mode confusion patterns
+  (Sarfati's intra/extra-author analysis).
+
+## 6. Datasets in the Literature
+
+| Dataset | Used by | Description |
+|--------|---------|-------------|
+| Project Gutenberg | Sarfati | Public-domain literature for author-attribution |
+| HC3 | Guo 2023, many | 24K Q&A with human + ChatGPT answers |
+| M4 | Wang 2024 | Multi-generator × multi-domain × multi-lingual |
+| Comprehensive (Roy 2025) | Roy 2025 | NYT + 6 LLMs |
+| DACTYL | Thorat 2025 | Few-shot adversarial AI text |
+| FD-Dataset | Fu 2025 | 90K samples from 20 LLMs (fingerprinting) |
+| GPT-3-generated XSum/SQuAD/WritingPrompts | DetectGPT | Standard zero-shot detection eval |
+
+For "less-canonical" modes (dictation, typing artifacts), no off-the-shelf labeled
+dataset exists — we'd need to construct synthetic data (e.g., LibriSpeech transcripts,
+typo-injection scripts).
+
+## 7. Gaps and Opportunities Relevant to the Hypothesis
+
+1. **"Modes" beyond AI/human and author/style are largely unexplored.** Almost the
+   entire literature treats these two as separate problems with separate detectors.
+   No prior work asks: are dictation, typing-keyboard-layout, register, etc., all
+   instances of the same "mode" abstraction? This is the project's main novelty.
+
+2. **Unsupervised discovery of modes** (via SAEs / dictionary learning) has been
+   demonstrated for features like "code", "emotion", "deception" but not systematically
+   for stylistic or production-channel modes.
+
+3. **Sarfati shows style is encoded but does not intervene.** A causal-style experiment
+   (steer the model along the "literary style" direction and observe output change)
+   would strengthen "mode as latent variable" beyond decoding.
+
+4. **Cross-mode interference is unstudied.** If we train a probe to detect dictation,
+   does it confuse with "informal register"? With "AI generation"? Disentangling
+   modes is itself an open problem.
+
+5. **Robustness to natural distribution shift** (cross-domain, cross-generator,
+   adversarial) is the main failure mode of all AI-text detectors. Mode probes
+   trained on hidden states (Sarfati) may have better generalization than output-
+   distribution detectors — worth testing.
+
+## 8. Recommendations for Experimental Design
+
+### Primary experiment (replicates Sarfati, extends to "AI vs. human" mode)
+
+**Setup**: Llama-3.2-1B (free, fast, 16 layers).
+
+**Probe pipeline**:
+1. For each text sample, tokenize and take only the first N tokens (N = 64 or 128).
+2. Forward pass through the model; collect the last-token hidden state at every layer L.
+3. Train an SVM (binary) or MLP (multiclass) probe on these embeddings.
+4. Evaluate accuracy by (N, L) — a heatmap as in Sarfati Fig. 2B.
+
+**Modes to probe**:
+- **Mode 1: Authorship** — Project Gutenberg corpus (11 novels, 6 authors).
+  Expected: replicate Sarfati's ~75% multiclass / ~95% binary at N=128, L=16.
+- **Mode 2: Human vs. ChatGPT** — HC3 dataset.
+  Open question: at what layer L does AI-mode become linearly decodable?
+  Compare with DetectGPT AUROC as zero-shot baseline.
+- **Mode 3: Generator attribution** — M4 dataset (which LLM generated this?).
+  Test cross-domain generalization (train on arxiv_chatGPT, test on reddit_chatGPT).
+
+### Secondary experiments (novelty / hypothesis-extending)
+
+- **Synthetic typing-error mode**: Inject QWERTY-adjacent typos into clean text at
+  varying rates. Train a probe to detect typo-injection. Compare to a probe trained
+  to detect actually-mistyped Wikipedia revision-history data (if available).
+- **Probe transfer across modes**: Does a probe trained on (author = JA vs. MT)
+  generalize at all to (formal vs. ELI5)? Same human authors, different "register"
+  mode. Quantifies how factorized the mode subspaces really are.
+- **PCA dimensionality scan**: Apply Sarfati's PCA technique to each mode subspace
+  and report intrinsic dimension. Hypothesis: production-channel modes (dictation,
+  typing) have lower-dim subspaces than authorship.
+
+### Tertiary / stretch experiments
+
+- **SAE feature interpretation**: Train a sparse autoencoder on Llama-3.2-1B
+  activations from a mixed-mode corpus. Inspect top-activating examples for each
+  feature — do we discover unsupervised "mode" features?
+- **Causal intervention**: Use linear probe weights as steering vectors. Project them
+  out of the residual stream; observe how generations change. Tests whether modes
+  are merely decodable or also load-bearing.
+
+## 9. Recommended Resources Summary
+
+- **Models**: Llama-3.2-1B (Sarfati replication), GPT-Neo / Pythia (compute-light alternatives)
+- **Datasets**: Project Gutenberg (downloaded), HC3 (downloaded), M4 (in code/M4/data/)
+- **Code baselines**: detect-gpt (zero-shot), HC3 reference detectors, M4 baselines
+- **Probe library**: scikit-learn (SVM, MLP, LogReg); for SAEs: SAELens or train custom
+
+The combination of (a) Sarfati's methodology, (b) the gathered datasets, and
+(c) the cloned baselines is sufficient to run all of the primary and secondary
+experiments above without further resource gathering.
+
+
+════════════════════════════════════════════════════════════════════════════════
+                          PAPER REQUIREMENTS
+════════════════════════════════════════════════════════════════════════════════
+
+Generate a complete academic paper with the following structure:
+
+1. TITLE
+   - Clear, specific, informative
+   - Should convey main finding or contribution
+
+2. AUTHOR
+   - Use this exact author line in the \author{} block: Ari Holtzman and NeuriCo
+
+3. ABSTRACT (150-250 words)
+   - Problem statement
+   - Approach
+   - Key results
+   - Significance
+
+4. INTRODUCTION
+   - Research problem and motivation
+   - Gap in existing work
+   - Our contribution (be specific)
+   - Paper organization
+
+5. RELATED WORK
+   - Organized by theme/approach
+   - Position our work relative to prior work
+   - Cite papers from literature review
+
+6. METHODOLOGY
+   - Clear description of approach
+   - Experimental setup
+   - Datasets used
+   - Evaluation metrics
+   - Baselines
+
+7. RESULTS
+   - Present results with tables and figures
+   - Statistical analysis
+   - Comparison to baselines
+   - Ablation studies (if applicable)
+
+8. DISCUSSION
+   - Interpretation of results
+   - Limitations
+   - Broader implications
+
+9. CONCLUSION
+   - Summary of contributions
+   - Key findings
+   - Future work
+
+10. REFERENCES
+   - BibTeX format
+   - All cited papers
+
+════════════════════════════════════════════════════════════════════════════════
+                          OUTPUT FORMAT
+════════════════════════════════════════════════════════════════════════════════
+
+Create a MODULAR LaTeX project with the following directory structure:
+
+paper_draft/
+├── main.tex              # Main file that imports all sections
+├── references.bib        # BibTeX references
+├── sections/
+│   ├── abstract.tex      # Abstract content
+│   ├── introduction.tex  # Introduction section
+│   ├── related_work.tex  # Related work section
+│   ├── methodology.tex   # Methodology section
+│   ├── results.tex       # Results section
+│   ├── discussion.tex    # Discussion section
+│   └── conclusion.tex    # Conclusion section
+├── figures/              # Directory for any generated figures
+├── tables/               # Directory for complex standalone tables
+└── appendix/             # Directory for appendix sections (if needed)
+
+INSTRUCTIONS:
+1. First, create the directory structure above (mkdir -p paper_draft/sections paper_draft/figures paper_draft/tables paper_draft/appendix)
+2. Write main.tex using the EXACT preamble for NEURIPS:
+
+   \documentclass{article}
+   \usepackage[final]{neurips_2025}  % NEURIPS style (neurips_2025.sty is in paper_draft/)
+   \usepackage[hidelinks]{hyperref}  % REQUIRED: clickable links
+   \usepackage{booktabs}  % REQUIRED: professional tables
+   \usepackage{graphicx}
+   \usepackage{amsmath,amssymb}
+
+   % Import command files
+   \input{commands/math}
+   \input{commands/general}
+   \input{commands/macros}
+
+   % Use this bibliography style:
+   \bibliographystyle{plainnat}
+
+   \author{Ari Holtzman and NeuriCo}
+
+   - Use \input{sections/...} to include each section
+   - Use \bibliography{references} for references
+3. Write each section file with COMPLETE content (no placeholders)
+4. Each section file should include its \section{} command
+5. Write references.bib with all citations in BibTeX format
+6. After writing all files, compile the paper:
+   cd paper_draft && pdflatex -interaction=nonstopmode main.tex && bibtex main && pdflatex -interaction=nonstopmode main.tex && pdflatex -interaction=nonstopmode main.tex
+
+This modular structure allows humans to easily:
+- Edit individual sections without navigating a large file
+- Track changes per section
+- Reuse sections across different paper versions
+
+════════════════════════════════════════════════════════════════════════════════
+                          QUALITY REQUIREMENTS
+════════════════════════════════════════════════════════════════════════════════
+
+- Academic tone throughout
+- All claims must be supported by data from the experiment report
+- Proper citations using \cite{} commands
+- Clear figures and tables with proper captions
+- NO placeholder text - every section must have real content
+- The paper MUST compile without errors
+- If compilation fails, debug and fix the LaTeX errors
+
+════════════════════════════════════════════════════════════════════════════════
+                          LAB WRITING STYLE
+════════════════════════════════════════════════════════════════════════════════
+
+Follow these lab-specific conventions to match our paper style:
+
+1. LANGUAGE STYLE:
+   - Use active voice: "We propose", "We examine", "We focus on"
+   - Be direct and confident: "Our main question is...", "We hypothesize that..."
+   - State things clearly and simply - prefer plain language over jargon
+   - Use bold questions as paragraph organizers: {\bf what is X?}
+   - Include specific quantitative claims: "8.97% over baseline"
+   - Avoid fancy wording: "utilize" → "use", "facilitate" → "help"
+
+2. INTRODUCTION STRUCTURE:
+   - Engaging hook (get to the point quickly)
+   - Problem importance
+   - Gap identification
+   - Your approach with method figure reference
+   - Quantitative preview of results
+   - Contribution bullets (3-4 items, action verbs)
+
+3. CONTRIBUTION LISTS:
+   \begin{itemize}[leftmargin=*,itemsep=0pt,topsep=0pt]
+       \item We propose...
+       \item We conduct...
+       \item We complement...
+   \end{itemize}
+
+4. MODULAR COMMANDS STRUCTURE:
+   Command templates are pre-copied to paper_draft/commands/:
+   - math.tex: Math notation macros
+   - general.tex: Formatting macros
+   - macros.tex: Project-specific term definitions (customize this for your paper)
+
+   In main.tex, include:
+   \input{commands/math}
+   \input{commands/general}
+   \input{commands/macros}
+
+5. REFERENCE CONVENTIONS:
+   Use reference macros from math.tex:
+   - \figref{fig:name} for "figure 1" (lowercase, in-sentence)
+   - \Figref{fig:name} for "Figure 1" (capitalized, start of sentence)
+   - \secref{sec:name} for "section 2"
+
+6. TEXT FORMATTING:
+   - Use \para{Header text} for bold paragraph headers
+   - Define method/dataset names with \textsc and \xspace:
+     \newcommand{\methodname}{\textsc{MethodName}\xspace}
+
+7. TABLE FORMATTING:
+   - Use booktabs package (no vertical lines)
+   - Use \resizebox{\textwidth}{!}{...} for wide tables
+   - Use @{} to remove padding at table edges
+   - Use \cmidrule(lr){x-y} for sub-headers
+   - Use \textsc{} for dataset/method names in headers
+   - Bold best results with {\bf ...}
+
+8. FIGURE FORMATTING:
+   - Use 0.32\textwidth for 3-column subfigures
+   - Use 0.95\linewidth for full-width figures
+   - Use \input{figures/legend} for shared legends
+   - Write self-contained captions explaining key observations
+
+9. RESULTS PRESENTATION:
+   - Define \increase and \decrease for colored arrows (green up, red down)
+   - Bold best results in tables
+   - Report confidence intervals when available
+
+10. ALGORITHM STYLING:
+    - Use algpseudocode with [noend]
+    - Use \triangleright for comments
+
+11. HYPERLINKS (REQUIRED):
+    - Always use \usepackage[hidelinks]{hyperref} or with colored links
+    - All citations, section refs, figure refs, table refs must be clickable
+    - This is essential for reader navigation
+
+════════════════════════════════════════════════════════════════════════════════
+                          WORKFLOW: REVIEW AND REFLECT
+════════════════════════════════════════════════════════════════════════════════
+
+Before calling finish, you MUST complete these review steps:
+
+1. REVIEW RESOURCES (at the start):
+   - Read .claude/skills/paper-writer/SKILL.md for detailed guidance
+   - Study templates/paper_writing/lab_style_guide.md for style conventions
+   - Browse paper_examples/ for formatting and language patterns
+
+2. SELF-REFLECTION (before finishing):
+   After writing all sections, review your work against these criteria:
+
+   LANGUAGE CHECK:
+   - [ ] Is the writing clear and jargon-free?
+   - [ ] Are claims specific with quantitative support?
+   - [ ] Is active voice used throughout?
+
+   FORMATTING CHECK:
+   - [ ] Does main.tex include \input{commands/math}, \input{commands/general}, \input{commands/macros}?
+   - [ ] Is hyperref package included for clickable references?
+   - [ ] Do tables use booktabs (no vertical lines)?
+   - [ ] Are best results bolded in tables?
+   - [ ] Are figures/tables properly captioned?
+
+   STRUCTURE CHECK:
+   - [ ] Does introduction follow: hook → importance → gap → approach → preview → contributions?
+   - [ ] Are contribution bullets specific with action verbs?
+   - [ ] Does the paper compile without errors?
+
+3. FIX ISSUES:
+   - Address any issues found in the self-reflection
+   - Re-compile and verify the PDF looks correct
+
+Only after completing this review should you consider the paper finished.

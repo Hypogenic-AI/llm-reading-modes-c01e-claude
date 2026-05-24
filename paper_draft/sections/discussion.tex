@@ -1,0 +1,46 @@
+\section{Discussion}
+\label{sec:discussion}
+
+\subsection{Production \modes as a unified abstraction}
+
+The combination of high per-mode decodability and near-orthogonal probe directions argues for a particular picture: \modes are not a single ``style'' axis with different projections, but rather multiple distinct subspaces that coexist in the residual stream without interfering with one another. Pairwise cosines $\leq 0.18$ across all six pairs --- spanning content, register, author identity, and surface artifact --- are strong evidence that the \modes abstraction is real in the sense of organising several previously separate problems (AI-text detection, stylometry, register classification) into one geometric picture.
+
+The most informative non-trivial transfer is \register $\to$ \aihuman at 0.74. Project AI-vs-human data onto the formality direction and three-quarters of the AI-vs-human label is recovered. This is the residue of an empirical fact about ChatGPT-era text that has been noted in non-neural features \citep{schafer2025stylistic} but not previously quantified in latent space: AI writing biases towards formal register. Our cross-transfer matrix gives a clean operationalisation of this overlap.
+
+\subsection{A three-tier layer-depth taxonomy}
+
+The depth profiles split into three tiers that map cleanly onto the type of cue each \modes relies on.
+
+\begin{itemize}[leftmargin=*,itemsep=0pt,topsep=0pt]
+\item \textbf{Shallow content modes} (\aihuman, \register) climb to near-saturation by $L=2$. Their cues are common-word distributional features visible in early representations.
+\item \textbf{Gradual author modes} (\authorship) accumulate across the entire stack. Author identity integrates many lexical and syntactic cues; no single layer dominates.
+\item \textbf{Late surface modes} (\typo) become decodable only at the very last layers. Surface lexical structure becomes explicit at the layers that prepare next-token distributions, which is also where misspelled tokens become distinguishable from their correct neighbours.
+\end{itemize}
+
+This three-tier taxonomy organises what was previously a scattered observation that different latent variables ``emerge at different layers,'' and gives a falsifiable prediction: a \modes whose cues are entirely lexical-surface should reach peak accuracy at the final block rather than at intermediate layers.
+
+\subsection{Surface features sometimes win, and that is informative}
+
+\tfidf beats the neural probe on \authorship and \typo by 17 points each. A reasonable reviewer would read this as a negative result for ``deep representation.'' We think the right interpretation is more nuanced. \tfidf has 20K explicit lexical dimensions and trivially sees the very tokens that distinguish Joyce from Twain or QWERTY typos from Dvorak typos. The neural probe accesses a 1536-dim summary passed through a causal-LM bottleneck. The fact that 1536 dims still recover 79\% of 7-author classification --- and that those same hidden states simultaneously support three other near-orthogonal \modes --- is a statement about \emph{how much} stylometry is encoded in compact geometric form, not whether it is encoded at all. Surface n-grams cannot exhibit cross-mode orthogonality because they have no shared representation space across \modes; that geometric property is what our experiments are designed to expose.
+
+\subsection{Implications}
+
+\para{Privacy and side-channels.} If keyboard-layout typing artifacts, register, and AI-vs-human origin are all recoverable from arbitrary writing using a single linear probe, then any system that runs a mid-size LLM over user text is producing inferences far beyond what the text overtly states. The \typo experiment is the most pointed: a 1-D direction separates QWERTY from Dvorak typo patterns at 0.745 even though no token sequence is informative on its own, because the \emph{statistical pattern} of substitutions encodes the keyboard.
+
+\para{Steering and control.} Near-orthogonality of \modes directions predicts that activation steering along one mode (\eg ``make this less formal'') should not disturb another (\eg ``preserve the author's voice''). This is testable; we leave the causal-intervention follow-up to future work.
+
+\para{Benchmark contamination diagnostics.} A linear probe trained on \aihuman in our setting recovers AI-vs-human at $>$99\% accuracy. Even when AI generations are paraphrased to be surface-invisible, hidden-state probes plausibly remain useful as cheap contamination diagnostics.
+
+\subsection{Limitations}
+
+\para{Single model.} We use \qwen only. The qualitative findings of \citet{sarfati2025prompt} on \llama replicate cleanly in our \authorship results, suggesting model-independence, but cross-model robustness was not directly measured.
+
+\para{Synthetic modes differ from natural ones.} Our \typo injection uses a uniform substitution rate; real human typos cluster and depend on cognitive load. \register pairs are LLM-generated, so they reflect \emph{the LLM's notion of register} rather than actual human formal/casual writing. The synthetic construction is what gives us clean ground-truth labels but also limits ecological validity.
+
+\para{HC3 vintage.} HC3 was collected in early 2023; today's ChatGPT writes differently. The ``AI-mode'' direction we recover is \emph{2023 ChatGPT style}, not a generic property of LLMs.
+
+\para{No causal intervention.} We demonstrate decodability and disentanglement, not load-bearing-ness. A causal-style experiment along the lines of \citet{li2022emergent} --- projecting out a mode direction and measuring generation change --- would strengthen the latent-variable claim. We leave this to follow-up work.
+
+\para{Probe-classifier confound.} Our cross-transfer metric uses a 1-D \logreg on the projection rather than fixing the original probe's threshold. This is generous to chance overlap; a stricter test would use the trained threshold directly and would likely produce lower transfer numbers, strengthening rather than weakening the orthogonality conclusion.
+
+\para{No human baseline.} We have no measurement of how well humans recover these \modes from the same text. Such a baseline would calibrate the probe numbers against an ecological reference, and is a natural follow-up.
